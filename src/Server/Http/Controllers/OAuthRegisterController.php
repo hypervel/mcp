@@ -44,7 +44,8 @@ class OAuthRegisterController
                     return;
                 }
 
-                if (in_array('*', config()->array('mcp.redirect_domains'), true)) {
+                if (in_array('*', config()->array('mcp.redirect_domains'), true)
+                    && (parse_url($value, PHP_URL_SCHEME) === 'https' || $this->isLocalhostUrl($value))) {
                     return;
                 }
 
@@ -70,17 +71,10 @@ class OAuthRegisterController
             return response()->json([
                 'error' => $redirectError !== '' ? 'invalid_redirect_uri' : 'invalid_client_metadata',
                 'error_description' => $redirectError !== '' ? $redirectError : $errors->first(),
-            ], 400);
+            ], 400, ['Cache-Control' => 'no-store', 'Pragma' => 'no-cache']);
         }
 
         $validated = $validator->validated();
-
-        if (! class_exists(ClientRepository::class)) {
-            return response()->json([
-                'error' => 'server_error',
-                'error_description' => 'OAuth support (Passport) is not installed.',
-            ], 500);
-        }
 
         $clients = Container::getInstance()->make(ClientRepository::class);
 
@@ -110,32 +104,31 @@ class OAuthRegisterController
             return response()->json([
                 'error' => 'server_error',
                 'error_description' => 'The client could not be registered.',
-            ], 500);
+            ], 500, ['Cache-Control' => 'no-store', 'Pragma' => 'no-cache']);
         }
 
         return response()->json([
             'client_id' => (string) $client->id,
+            'client_name' => $client->name,
             'grant_types' => $client->grant_types,
             'response_types' => ['code'],
             'redirect_uris' => $client->redirect_uris,
-            'scope' => Registrar::OAUTH_SCOPE,
+            ...($client->scopes === null ? [] : ['scope' => implode(' ', $client->scopes)]),
             'token_endpoint_auth_method' => 'none',
             ...$metadata,
-        ], 201);
+        ], 201, ['Cache-Control' => 'no-store', 'Pragma' => 'no-cache']);
     }
 
     /**
-     * Grant the MCP scope when the client restricts its scopes.
+     * Grant the MCP scope within the anonymous registration policy.
      */
     protected function grantMcpScope(Client $client): void
     {
-        $scopes = $client->refresh()->getAttribute('scopes');
+        $scopes = $client->refresh()->scopes ?? config()->array('passport.registration.scopes');
+        // Model defaults must not grant anonymous clients wildcard or provisioning authority.
+        $scopes = array_values(array_diff(array_unique([...$scopes, Registrar::OAUTH_SCOPE]), ['*', 'passport:register']));
 
-        if (! is_array($scopes) || in_array(Registrar::OAUTH_SCOPE, $scopes, true)) {
-            return;
-        }
-
-        if (! $client->forceFill(['scopes' => [...$scopes, Registrar::OAUTH_SCOPE]])->save()) {
+        if (! $client->forceFill(['scopes' => $scopes])->save()) {
             throw new RuntimeException('The client scopes could not be saved.');
         }
     }
